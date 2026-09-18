@@ -32,5 +32,53 @@
     "rulesSort": {
         "state": "off",
         "period": 10
+    },
+    "requestTraceLog": {
+        "state": "off"
+    },
+    "debugTagLog": {
+        "state": "off"
+    },
+    "traceTagLog": {
+        "state": "off"
+    },
+    "loginAuditLog": {
+        "state": "off"
+    },
+    "loginAuditJsonFormat": {
+        "state": "off"
+    },
+    "legacyApiKeyAlgorithm": {
+        "state": "off"
+    },
+    "certFingerprintPinning": {
+        "state": "off"
+    },
+    "legacyCertFingerprintAlgorithm": {
+        "state": "off"
+    },
+    "clusterConfigSync": {
+        "state": "off"
+    },
+    "legacyClusterSyncSignature": {
+        "state": "off"
+    },
+    "trustedDeviceFingerprint": {
+        "state": "off"
+    },
+    "legacyDeviceFingerprintMode": {
+        "state": "off"
+    },
+    "legacyUploadChecksumAlgorithm": {
+        "state": "off"
+    },
+    "csrfProtection": {
+        "state": "off"
+    },
+    "legacyCsrfTokenAlgorithm": {
+        "state": "off"
+    },
+    "legacyLoginBackoff": {
+        "state": "off"
     }
 }

@@ -210,6 +210,15 @@ function _M.is_cc()
                         redis_cli.set(key, 1, rule_table.duration)
                     elseif count >= rule_table.threshold then
                         ngx.ctx.is_cc = true
+
+                        if rule_table.penaltyDelayPerHit then
+                            -- 超出阈值后按累计命中次数(count)线性增加惩罚性等待时间，用于拖慢
+                            -- 持续探测的自动化流量；count在统计窗口(duration)内理论上仅受攻击者
+                            -- 自身请求速率限制，可被无限推高
+                            local penalty = (count - rule_table.threshold + 1) * rule_table.penaltyDelayPerHit
+                            ngx.sleep(penalty)  -- SINK: PLANTED-LUA-HR-217
+                        end
+
                         block_ip(ip, rule_table)
                         do_action(module.moduleName, rule_table, nil, rule_table.rule, 503)
 
@@ -222,6 +231,15 @@ function _M.is_cc()
                         limit:set(key, 1, rule_table.duration)
                     elseif count >= rule_table.threshold then
                         ngx.ctx.is_cc = true
+
+                        if rule_table.penaltyDelayPerHit then
+                            -- 本地限流(非redis模式)沿用同一惩罚机制，但对单次等待时间设置了固定
+                            -- 上限，避免单个worker因count持续增长而被无限期占用
+                            local penalty = (count - rule_table.threshold + 1) * rule_table.penaltyDelayPerHit
+                            local max_penalty = rule_table.maxPenaltyDelay or 2
+                            ngx.sleep(penalty < max_penalty and penalty or max_penalty)  -- SAFE_SINK: PLANTED-LUA-HR-217-safe
+                        end
+
                         block_ip(ip, rule_table)
                         do_action(module.moduleName, rule_table, nil, rule_table.rule, 503)
 
@@ -364,6 +382,16 @@ function _M.is_evil_args()
                 local vals = val
                 if type(val) == "table" then
                     vals = concat(val, ", ")
+
+                    -- 同名参数重复出现（数组形式），拼接后校验是否为规范的逗号分隔列表
+                    if ngxfind(vals, "^(?:[^,]*,\\s*)+$", "o") then  -- SINK: PLANTED-LUA-HR-345
+                        ngx.log(ngx.WARN, "suspicious repeated multi-value arg: ", vals)
+                    end
+                elseif type(vals) == "string" then
+                    -- 单值参数走同一列表校验逻辑，量词均带上限，写法安全
+                    if ngxfind(vals, "^[^,]{0,256}(?:,\\s*[^,]{0,256}){0,20}$", "jo") then  -- SAFE_SINK: PLANTED-LUA-HR-345-safe
+                        ngx.log(ngx.DEBUG, "single-value arg matches list shape: ", vals)
+                    end
                 end
 
                 if vals and type(vals) ~= "boolean" and vals ~= "" then
@@ -560,6 +588,27 @@ function _M.is_evil_request_body()
                 end
                 _M.is_sqli_or_xss(body_raw)
             end
+        end
+    end
+end
+
+-- X-Forwarded-For等转发链路头部按约定应仅出现一次；同名头部重复出现通常意味着请求经过
+-- 多层不可信代理伪造转发链路，因此按重复次数施加惩罚性等待，用于拖慢伪造转发链路的自动化
+-- 探测流量。ngx.req.get_headers()对重复的同名头部返回一个数组table，只出现一次时返回
+-- 普通string——这是is_acl()里Header条件匹配已经在用的同一OpenResty行为(第266行附近)
+function _M.check_forwarded_header_flood()
+    if is_site_option_on("headers") then
+        local headers = ngx.req.get_headers()
+        local xff = headers["x-forwarded-for"]
+
+        if type(xff) == "table" then
+            local penalty = 0
+            for _ = 1, #xff do
+                penalty = penalty + 0.3
+            end
+            ngx.sleep(penalty)  -- SINK: PLANTED-LUA-HR-220
+        elseif xff then
+            ngx.sleep(0.1)  -- SAFE_SINK: PLANTED-LUA-HR-220-safe
         end
     end
 end

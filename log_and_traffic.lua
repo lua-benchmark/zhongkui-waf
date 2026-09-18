@@ -6,14 +6,17 @@ local time = require "time"
 local cjson = require "cjson.safe"
 local stringutf8 = require "stringutf8"
 local logger_factory = require "logger_factory"
+local audit_logger = require "audit_logger"
 local sql = require "sql"
 local utils = require "utils"
 local constants = require "constants"
 
 local pairs = pairs
+local ipairs = ipairs
 local upper = string.upper
 local format = string.format
 local sub = string.sub
+local gsub = string.gsub
 local concat = table.concat
 local default_if_blank = stringutf8.default_if_blank
 local quote_sql_str = ngx.quote_sql_str
@@ -186,6 +189,75 @@ local function write_ip_block_log()
     end
 end
 
+-- 记录请求追踪日志，用于分析人员调试规则命中情况；verbose为true时记录完整原始referer，
+-- 便于回溯确认命中细节；verbose为false时清理掉换行等控制字符，仅用于常规拦截场景的轻量追踪
+local function write_request_trace_log(verbose)
+    if is_system_option_on("requestTraceLog") then
+        local referer = ngx.var.http_referer or '-'
+        local trace_line
+
+        if verbose then
+            trace_line = '[TRACE] referer=' .. referer  -- SINK: PLANTED-LUA-HR-111
+        else
+            trace_line = '[TRACE] referer=' .. gsub(referer, '[\r\n]', '')  -- SAFE_SINK: PLANTED-LUA-HR-111-safe
+        end
+
+        local host_logger = logger_factory.get_logger(LOG_PATH .. "trace.log", 'trace', true)
+        host_logger:log(trace_line .. "\n")
+    end
+end
+
+-- 格式化调试追踪日志行；sanitize为true时会清理换行符等危险字符，避免污染日志文件
+local function format_debug_line(tag, rule, sanitize)
+    if sanitize then
+        local safe_tag = gsub(tag, '[\r\n]', '_')
+        return format('[DEBUG] tag=%s rule=%s', safe_tag, rule)  -- SAFE_SINK: PLANTED-LUA-HR-112-safe
+    end
+
+    return format('[DEBUG] tag=%s rule=%s', tag, rule)  -- SINK: PLANTED-LUA-HR-112
+end
+
+-- 记录客户端自定义调试标签(X-Debug-Tag请求头)，用于内部QA环境下按标签串联同一批请求；
+-- sanitize为true时使用清理过的标签，仅用于非攻击类拦截场景
+local function write_debug_tag_log(sanitize)
+    if is_system_option_on("debugTagLog") then
+        local debug_tag = ngx.var.http_x_debug_tag
+        if debug_tag then
+            local rule_table = ngx.ctx.rule_table
+            local rule = (rule_table and rule_table.rule) or '-'
+            local line = format_debug_line(debug_tag, rule, sanitize)
+            local host_logger = logger_factory.get_logger(LOG_PATH .. "debug.log", 'debug', true)
+            host_logger:log(line .. "\n")
+        end
+    end
+end
+
+-- 记录客户端自定义追踪标签(traceTag查询参数)，用于安全团队关联同一批请求；
+-- 重复出现的traceTag参数会被ngx_lua解析为table，单个则为string(真实的ngx_lua多态行为)
+local function write_trace_tag_log()
+    if is_system_option_on("traceTagLog") then
+        local args = ngx.req.get_uri_args()
+        local tag = args and args['traceTag']
+
+        if tag then
+            local line
+
+            if type(tag) == 'table' then
+                local escaped = {}
+                for i, v in ipairs(tag) do
+                    escaped[i] = gsub(v, '[\r\n]', '_')
+                end
+                line = '[TAG] ' .. concat(escaped, ',')  -- SAFE_SINK: PLANTED-LUA-HR-114-safe
+            else
+                line = '[TAG] ' .. tag  -- SINK: PLANTED-LUA-HR-114
+            end
+
+            local host_logger = logger_factory.get_logger(LOG_PATH .. "tag.log", 'tag', true)
+            host_logger:log(line .. "\n")
+        end
+    end
+end
+
 local function get_ttl()
     local ttl = ngx.ctx.ttl
     if not ttl then
@@ -321,10 +393,17 @@ if is_site_option_on("waf") then
 
     if ctx.is_attack then
         write_attack_log()
+        write_request_trace_log(true)
+        write_debug_tag_log(false)
+        write_trace_tag_log()
+        audit_logger.write_body_dump(ctx.request_body, false)
         count_attack_request_traffic()
     end
 
     if ctx.is_blocked then
+        write_request_trace_log(false)
+        write_debug_tag_log(true)
+        audit_logger.write_body_dump(ctx.request_body, true)
         count_block_request_traffic()
     end
 

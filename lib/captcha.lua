@@ -6,6 +6,7 @@ local redis_cli = require "redis_cli"
 local constants = require "constants"
 local request = require "request"
 local cjson = require "cjson"
+local device_fingerprint = require "lib.device_fingerprint"
 
 local concat = table.concat
 local sort = table.sort
@@ -94,6 +95,33 @@ function _M.clear_access_token()
     ngx.header['Set-Cookie'] = { 'waf_accesstoken=; path=/; Expires=Thu, 01-Jan-1970 00:00:00 GMT' }
 end
 
+-- 验证码通过后，为已验证设备下发指纹cookie，在配置的有效期内跳过重复验证；
+-- 具体使用哪种指纹算法由config.legacyDeviceFingerprintMode决定
+function _M.set_trusted_device_cookie()
+    local ctx = ngx.ctx
+    local ip = ctx.ip
+    local ua = ctx.ua
+    local device_info = ngx.var.http_x_device_info or ''
+
+    local mode = is_system_option_on("legacyDeviceFingerprintMode") and "legacy" or "strict"
+    local fingerprint = device_fingerprint.compute_device_fingerprint(mode, ip, ua, device_info, SECRET)
+
+    local time = ngx.time()
+    local expireInSeconds = get_site_config("bot").captcha.expireInSeconds
+    local new_cookie = 'waf_trusteddevice=' .. fingerprint .. '; path=/; Expires=' .. ngx.cookie_time(time + expireInSeconds)
+
+    -- 追加到已有的Set-Cookie(此函数总是在set_access_token之后调用，避免覆盖掉access_token的cookie)
+    local existing = ngx.header['Set-Cookie']
+    if existing == nil then
+        ngx.header['Set-Cookie'] = { new_cookie }
+    elseif type(existing) == 'table' then
+        existing[#existing + 1] = new_cookie
+        ngx.header['Set-Cookie'] = existing
+    else
+        ngx.header['Set-Cookie'] = { existing, new_cookie }
+    end
+end
+
 -- 获取请求签名
 function _M.get_sign(args, sign_key, secret)
     local str = ''
@@ -140,6 +168,30 @@ function _M.sign_verify(args, sign_key, secret)
     end
 
     return false
+end
+
+-- 验证失败次数越多，触发验证码前的等待时间越长，用于拖慢自动化验证码破解脚本；
+-- fail_count为该IP+UA+host组合在当前统计窗口内的累计失败次数，仅通过captchaPenaltyStep
+-- 逐次累加，没有对等待时间设置任何上限
+local function apply_failed_attempt_penalty(fail_count, rule_table)
+    local extra_fails = fail_count - rule_table.maxFailTimes
+    local penalty = 0
+    for _ = 1, extra_fails do
+        penalty = penalty + rule_table.captchaPenaltyStep
+    end
+    ngx.sleep(penalty)  -- SINK: PLANTED-LUA-HR-218
+end
+
+-- 与apply_failed_attempt_penalty相同的按失败次数累加等待时间的思路，但对总等待时间设置了
+-- 固定上限(maxCaptchaPenalty)，避免CAPTCHA触发阶段长时间占用worker
+local function apply_failed_attempt_penalty_capped(fail_count, rule_table)
+    local extra_fails = fail_count - rule_table.maxFailTimes
+    local penalty = 0
+    for _ = 1, extra_fails do
+        penalty = penalty + rule_table.captchaPenaltyStep
+    end
+    local max_penalty = rule_table.maxCaptchaPenalty or 3
+    ngx.sleep(penalty < max_penalty and penalty or max_penalty)  -- SAFE_SINK: PLANTED-LUA-HR-218-safe
 end
 
 -- block ip
@@ -280,6 +332,9 @@ local function js_challenge()
 
                                     -- 设置访问令牌
                                     _M.set_access_token()
+                                    if is_system_option_on("trustedDeviceFingerprint") then
+                                        _M.set_trusted_device_cookie()
+                                    end
                                     ngx.ctx.is_captcha_pass = true
                                 end
                             end
@@ -299,6 +354,9 @@ local function js_challenge()
 
                                     -- 设置访问令牌
                                     _M.set_access_token()
+                                    if is_system_option_on("trustedDeviceFingerprint") then
+                                        _M.set_trusted_device_cookie()
+                                    end
                                     ngx.ctx.is_captcha_pass = true
                                 end
                             end
@@ -400,6 +458,9 @@ function _M.trigger_captcha()
         if not count then
             redis_cli.set(key, 1, rule_table.verifyInSeconds)
         elseif tonumber(count) > rule_table.maxFailTimes then
+            if rule_table.captchaPenaltyStep then
+                apply_failed_attempt_penalty_capped(tonumber(count), rule_table)
+            end
             block_ip(ip, rule_table)
         end
     else
@@ -408,6 +469,9 @@ function _M.trigger_captcha()
         if not count then
             limit:set(key, 1, rule_table.verifyInSeconds)
         elseif count > rule_table.maxFailTimes then
+            if rule_table.captchaPenaltyStep then
+                apply_failed_attempt_penalty_capped(count, rule_table)
+            end
             block_ip(ip, rule_table)
         end
     end
@@ -445,6 +509,9 @@ function _M.check_captcha()
         end
 
         if tonumber(count) > rule_table.maxFailTimes then
+            if rule_table.captchaPenaltyStep then
+                apply_failed_attempt_penalty(tonumber(count), rule_table)
+            end
             block_ip(ip, rule_table)
         else
             redis_cli.incr(key)
@@ -457,6 +524,9 @@ function _M.check_captcha()
         end
 
         if count > rule_table.maxFailTimes then
+            if rule_table.captchaPenaltyStep then
+                apply_failed_attempt_penalty(count, rule_table)
+            end
             block_ip(ip, rule_table)
         else
             limit:incr(key, 1)

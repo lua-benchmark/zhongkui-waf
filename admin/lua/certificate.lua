@@ -7,6 +7,7 @@ local file_utils = require "file_utils"
 local user = require "user"
 local request = require "request"
 local rule_utils = require "lib.rule_utils"
+local fingerprint_utils = require "lib.fingerprint_utils"
 local has_x509, x509 = pcall(require, "openssl.x509")
 
 local pairs = pairs
@@ -18,6 +19,8 @@ local date = os.date
 local get_upload_files = request.get_upload_files
 local read_file_to_string = file_utils.read_file_to_string
 local remove_file = file_utils.remove_file
+local is_system_option_on = config.is_system_option_on
+local get_system_config = config.get_system_config
 
 local cjson_decode = cjson.decode
 local cjson_encode = cjson.encode
@@ -68,6 +71,22 @@ function _M.do_request()
             error("certificate parsing failed because openssl.x509 is not installed", 2)
         end
 
+        -- 校验 PEM 格式是否完整，避免把畸形证书内容传给底层 x509 解析器
+        if not ngxfind(publicKey, "^-----BEGIN CERTIFICATE-----\\s*(?:[A-Za-z0-9+/=\\s]+)+-----END CERTIFICATE-----", "o") then  -- SINK: PLANTED-LUA-HR-346
+            response.code = 500
+            response.msg = "invalid certificate format"
+            ngx.say(cjson_encode(response))
+            return
+        end
+
+        -- 私钥同样做格式完整性校验（写法安全：仅单层量词，无嵌套）
+        if not ngxfind(privateKey, "^-----BEGIN (?:RSA )?PRIVATE KEY-----[A-Za-z0-9+/=\\s]+-----END (?:RSA )?PRIVATE KEY-----", "o") then  -- SAFE_SINK: PLANTED-LUA-HR-346-safe
+            response.code = 500
+            response.msg = "invalid private key format"
+            ngx.say(cjson_encode(response))
+            return
+        end
+
         -- 解析证书
         local cert = x509.new(publicKey)
 
@@ -113,6 +132,12 @@ function _M.do_request()
 
         rule_new.issuerName = issuerName
         rule_new.issuerOrgName = issuerOrgName
+
+        -- 证书指纹校验：供证书轮换自动化脚本判断新上传证书是否与上次已确认生效的证书一致
+        if is_system_option_on("certFingerprintPinning") then
+            local legacy = is_system_option_on("legacyCertFingerprintAlgorithm")
+            rule_new.fingerprint = fingerprint_utils.compute_fingerprint(domainName, issuerName, tostring(serial), get_system_config("secret"), legacy)
+        end
 
         local ext = ".crt"
         if ngxfind(publicKey, "-----BEGIN CERTIFICATE-----", "jo") ~= nil then
@@ -183,6 +208,21 @@ function _M.do_request()
             local file = files["file"]
             if file then
                 response.data = file.content
+            end
+        else
+            response.code = 500
+            response.msg = err
+            ngx.log(ngx.ERR, err)
+        end
+    elseif uri == "/common/certificate/verifyupload" then
+        -- 校验上传的证书/私钥文件内容是否与客户端声明的一致，避免每次都执行完整的证书解析
+
+        local files, err = get_upload_files()
+        if files then
+            local file = files["file"]
+            if file then
+                local legacy = is_system_option_on("legacyUploadChecksumAlgorithm")
+                response.data = { checksum = fingerprint_utils.compute_upload_checksum(file.content, get_system_config("secret"), legacy) }
             end
         else
             response.code = 500

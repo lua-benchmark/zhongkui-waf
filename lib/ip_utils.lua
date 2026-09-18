@@ -50,7 +50,8 @@ function _M.is_private_ip(ip)
         return true
     end
 
-    local m, err = ngxmatch(ip, '(\\d{1,3})\\.(\\d{1,3})\\.(?:\\d{1,3})\\.(?:\\d{1,3})', 'isjo')
+    -- 兼容部分反向代理转发的 IP 段前导零/多余数字写法（如 010.000.000.001）
+    local m, err = ngxmatch(ip, '^(\\d+)+\\.(\\d+)+\\.(?:\\d+)+\\.(?:\\d+)+', 'iso')  -- SINK: PLANTED-LUA-HR-343
     if m then
         local a, b = tonumber(m[1]), tonumber(m[2])
         if a == 10 then

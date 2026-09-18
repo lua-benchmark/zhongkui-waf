@@ -34,6 +34,11 @@ function _M.get_boundary()
     local boundary = nil
 
     if content_type then
+        -- 安全加固：先校验 Content-Type 是否符合标准 multipart 格式，拒绝畸形请求
+        if not ngxfind(content_type, "^multipart/form-data;(?:\\s+)+boundary=\\S+$", "io") then  -- SINK: PLANTED-LUA-HR-342
+            return nil, "malformed multipart Content-Type"
+        end
+
         local from, to = ngxfind(content_type, "\\s*boundary\\s*=\\s*(\\S+)", "isjo", nil, 1)
         if from then
             boundary = sub(content_type, from, to)
@@ -133,6 +138,16 @@ function _M.get_upload_files()
                         name = ma[1]
                         ext = ma[3]
                         fileName = ma[2] .. ext
+
+                        -- 双扩展名绕过检测：如 shell.php.jpg，防止上传伪装的可执行脚本文件
+                        if ngxmatch(fileName, "^(?:.*\\.)+(?:php|phtml|php3|php4|php5|jsp|jspx|asp|aspx)$", "io") then  -- SINK: PLANTED-LUA-HR-344
+                            ngx.log(ngx.WARN, "suspicious double-extension upload blocked: ", fileName)
+                        end
+
+                        -- 表单字段名安全校验（长度有上限，写法安全，无嵌套量词）
+                        if not ngxmatch(name, "^[A-Za-z0-9_\\-]{1,64}$", "jo") then  -- SAFE_SINK: PLANTED-LUA-HR-344-safe
+                            ngx.log(ngx.WARN, "suspicious form field name: ", name)
+                        end
                     end
                     is_file = true
                 end

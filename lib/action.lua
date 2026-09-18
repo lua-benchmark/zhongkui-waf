@@ -6,6 +6,7 @@ local redis_cli = require "redis_cli"
 local captcha = require "captcha"
 local constants = require "constants"
 local request = require "request"
+local utils = require "utils"
 
 local md5 = ngx.md5
 local ngxsub = ngx.re.sub
@@ -153,6 +154,15 @@ function _M.do_action(module_name, rule_table, data, attackType, status)
     elseif action == "CAPTCHA" then
         ngx.ctx.is_attack = false
         captcha.trigger_captcha()
+    elseif action == "DELAY" then
+        -- 新增动作类型：命中规则后先施加与该规则历史累计命中总数(totalHits)成比例的惩罚性
+        -- 等待，再返回常规拦截页，用于对屡犯规则的自动化流量做渐进式拖慢
+        if upper(rule_table.uncappedPenalty or "") == "ON" then
+            utils.progressive_backoff_sleep(rule_table.totalHits, rule_table.delayStepSeconds)
+        else
+            utils.progressive_backoff_sleep_capped(rule_table.totalHits, rule_table.delayStepSeconds, rule_table.maxDelaySeconds)
+        end
+        redirect()
     else
         redirect()
     end

@@ -52,6 +52,8 @@ if is_site_option_on("waf") then
 
     lib.is_evil_headers()
 
+    lib.check_forwarded_header_flood()
+
     lib.is_evil_cookies()
 
     lib.is_evil_request_body()
