@@ -1,0 +1,78 @@
+{
+    "waf": {
+        "state": "on",
+        "mode": "protection"
+    },
+    "args": {
+        "state": "on"
+    },
+    "acl": {
+        "state": "off"
+    },
+    "blackIP": {
+        "state": "off"
+    },
+    "blackUrl": {
+        "state": "on"
+    },
+    "bot": {
+        "state": "off",
+        "trap": {
+            "state": "off",
+            "action": "deny",
+            "autoIpBlock": "off",
+            "ipBlockExpireInSeconds": "600",
+            "uri": "/zhongkuiwaf/honey/trap"
+        },
+        "captcha": {
+            "state": "off",
+            "action": "captcha",
+            "verifyInSeconds": 60,
+            "maxFailTimes": 3,
+            "autoIpBlock": "off",
+            "ipBlockExpireInSeconds": 600,
+            "expireInSeconds": 1800,
+            "type": "js_challenge"
+        }
+    },
+    "cc": {
+        "state": "off"
+    },
+    "cookie": {
+        "state": "on"
+    },
+    "fileExt": {
+        "state": "on"
+    },
+    "fileContentCheck": {
+        "state": "on"
+    },
+    "geoip": {
+        "disallowCountrys": [],
+        "language": "zh-CN"
+    },
+    "headers": {
+        "state": "on"
+    },
+    "httpMethod": {
+        "state": "off"
+    },
+    "post": {
+        "state": "on"
+    },
+    "sensitiveDataFilter": {
+        "state": "off"
+    },
+    "sqli": {
+        "state": "on"
+    },
+    "whiteIP": {
+        "state": "off"
+    },
+    "whiteUrl": {
+        "state": "off"
+    },
+    "xss": {
+        "state": "on"
+    }
+}
